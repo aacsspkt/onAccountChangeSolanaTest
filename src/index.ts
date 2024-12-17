@@ -1,148 +1,126 @@
-import assert from "assert";
-import bs58 from "bs58";
-import dotenv from "dotenv";
-
-import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { TOKEN_PROGRAM_ID, AccountLayout } from "@solana/spl-token";
 import { clusterApiUrl, Connection, Keypair, PublicKey } from "@solana/web3.js";
 
 const connection = new Connection(clusterApiUrl("devnet"));
-const signers = getSigners();
+
+// Define the specific token mint (token type) we're interested in tracking
 const mint = new PublicKey("De31sBPcDejCVpZZh1fq8SNs7AcuWcBKuU3k2jqnkmKc");
-const sender = signers[1];
-const receiver = signers[2];
 const listeners: number[] = [];
 
-console.log("sender:", sender.publicKey.toString());
-console.log("receiver:", receiver.publicKey.toString());
-
-const receiverTokenAccount = getAssociatedTokenAddressSync(mint, receiver.publicKey);
-
 process.on("SIGINT", async function () {
-	console.log("Caught interrupt signal");
-	await removeListeners(listeners);
+  console.log("Caught interrupt signal");
+  // Remove all active listeners when the process is interrupted
+  await removeListeners(listeners);
 });
 
-let amount = BigInt(0);
-let latestSignature =
-	"31QPy7VtwMptsrjSyzH9hHgEmYLTNi1LCt1jmZLr74nYH2uzWRafSvgAS37iwjCUXtgbTDLRFF95ABaSepYf2foT";
+// List of whitelisted account addresses to monitor
+// Only accounts owned by these addresses will trigger further processing
+let whitelistedAccounts = [
+  "Bux7a8ifBH9zmbh6pJ4erL8v5BjsWZ97G3R7gLyxMGgH",
+  "6smCjxLghJ1TeKNqvDuo4hkLMH917Ej3RrSYBHHrUsLj",
+];
+
+// Mapping to track the most recent signature for each user's Program Derived Address (PDA)
+// This helps in tracking new transactions since the last check
+let signatureMap: {
+  [userPda: string]: string;
+} = {};
 
 async function main() {
-	// const amountResponse = await connection.getTokenAccountBalance(
-	// 	receiverTokenAccount,
-	// 	"confirmed",
-	// );
-	// amount = BigInt(amountResponse.value.amount);
+  const id1 = connection.onProgramAccountChange(
+    TOKEN_PROGRAM_ID, // Listen to all token program account changes
+    async (accountInfo, context) => {
+      // Extract account and owner information
+      let account = accountInfo.accountId;
+      let data = accountInfo.accountInfo.data;
 
-	console.log("subscribing listener...");
-	const id = connection.onAccountChange(
-		receiverTokenAccount,
-		async (accountInfo, context) => {
-			console.log("slot:", context.slot);
-			console.log("latest sig:", latestSignature);
-			const signatures = await connection.getSignaturesForAddress(
-				receiverTokenAccount,
-				{ until: latestSignature },
-				"confirmed",
-			);
-			console.log(
-				"signatures",
-				signatures.map((s) => s.signature),
-			);
-			latestSignature = signatures.map((s) => s.signature)[0];
-			console.log("latest sig:", latestSignature);
+      // Decode the account data using the token program's account layout
+      let parsedData = AccountLayout.decode(data);
+      let accountOwner = parsedData.owner;
+      console.log("accountOwner", accountOwner.toString());
 
-			// const rawAccount = AccountLayout.decode(accountInfo.data);
-			// const newAmount = rawAccount.amount;
-			// console.log("\n");
-			// console.log("prev amount:", amount);
-			// console.log("after amount:", newAmount);
-			// console.log("difference:", newAmount - amount);
-			// console.log("\n");
+      // Skip processing if the account owner is not whitelisted
+      if (!whitelistedAccounts.includes(accountOwner.toString())) {
+        console.log("account not whitelisted: ", account.toString());
+        return;
+      }
+      console.log("account whitelisted: ", account.toString());
 
-			// amount = newAmount;
-		},
-		{
-			commitment: "finalized",
-		},
-	);
+      if (signatureMap[accountOwner.toString()]) {
+        let currentSignature = signatureMap[accountOwner.toString()];
 
-	// listeners.push(id);
-	// console.log("listener id:", id);
-	const id1 = connection.onProgramAccountChange(
-		TOKEN_PROGRAM_ID,
-		(accountInfo, context) => {
-			console.log("\n");
-			console.log("slot:", context.slot);
-			console.log("account id:", accountInfo.accountId.toString());
-			console.log("account data", accountInfo.accountInfo.data.toString("base64"));
-			console.log("account lamports", accountInfo.accountInfo.lamports);
-			console.log("account executable", accountInfo.accountInfo.executable);
-			console.log("account owner", accountInfo.accountInfo.owner.toString());
-		},
-		{
-			filters: [
-				{
-					memcmp: {
-						offset: 0,
-						bytes: mint.toString(),
-					},
-				},
-			],
-			commitment: "confirmed",
-			// encoding: "base64",
-		},
-	);
-	listeners.push(id1);
-	console.log("listener id:", id1);
+        // Retrieve signatures for this account since the last tracked signature
+        const latestSignatures = await connection.getSignaturesForAddress(
+          account,
+          { until: currentSignature }, // Only get signatures before the current known signature
+          "confirmed"
+        );
 
-	await sleep(2_147_483_647); // max 32 bit signed integer
+        // Process each signature
+        for (let signature of latestSignatures) {
+          console.log("signature", signature.signature);
+
+          // Retrieve the full transaction details for each signature
+          const transaction = await connection.getParsedTransaction(
+            signature.signature
+          );
+
+          // TODO: Implement specific transaction filtering
+          // Check if the signature contains a USDC token-in transfer
+          // If it does, call a BuyCard function or perform specific actions
+        }
+
+        // Update the signature map with the most recent signature
+        signatureMap[accountOwner.toString()] = latestSignatures.map(
+          (s) => s.signature
+        )[0];
+      }
+    },
+    {
+      // Filter to only listen to accounts associated with the specific token mint
+      filters: [
+        {
+          memcmp: {
+            offset: 0,
+            bytes: mint.toString(),
+          },
+        },
+      ],
+      commitment: "confirmed",
+    }
+  );
+
+  listeners.push(id1);
+  console.log("listener id:", id1);
+
+  // Keep the script running for the maximum 32-bit signed integer milliseconds
+  // Effectively keeps the listener active until manually stopped
+  await sleep(2_147_483_647);
 }
 
+// Utility function to remove all active listeners
 export async function removeListeners(listeners: number[]) {
-	await Promise.all(
-		listeners.map(async (id) => {
-			console.log("unsubscribing listener:", id);
-			await connection.removeAccountChangeListener(id);
-		}),
-	);
+  await Promise.all(
+    listeners.map(async (id) => {
+      console.log("unsubscribing listener:", id);
+      await connection.removeAccountChangeListener(id);
+    })
+  );
 }
 
+// Simple sleep function to pause execution
 export function sleep(ms: number) {
-	return new Promise((r) => setTimeout(r, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-export function getSigners() {
-	dotenv.config();
-
-	const SECRET_KEYS = process.env.SECRET_KEYS;
-
-	assert(SECRET_KEYS && SECRET_KEYS != "", "missing env var: SECRET_KEYS");
-	const keypairs: Keypair[] = [];
-	try {
-		const secretKeys = JSON.parse(SECRET_KEYS);
-
-		assert(Array.isArray(secretKeys), "Invalid format for SECRET_KEYS");
-
-		for (const keys of secretKeys) {
-			// console.log("secret key", keys);
-			assert(keys && typeof keys === "string" && keys != "", "Invalid secret key");
-
-			const keypair = Keypair.fromSecretKey(bs58.decode(keys));
-
-			keypairs.push(keypair);
-		}
-	} catch (err: any) {
-		throw new Error("Some error occured parsing secret key: " + err.message);
-	}
-
-	return keypairs;
-}
-
+// Main execution with error handling
 main()
-	.then(async () => {
-		removeListeners(listeners);
-	})
-	.catch(async (err) => {
-		removeListeners(listeners);
-		throw err;
-	});
+  .then(async () => {
+    // Remove listeners on successful completion
+    removeListeners(listeners);
+  })
+  .catch(async (err) => {
+    // Remove listeners if an error occurs
+    removeListeners(listeners);
+    throw err;
+  });
